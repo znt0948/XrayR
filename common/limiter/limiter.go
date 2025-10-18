@@ -17,9 +17,15 @@ import (
 	goCache "github.com/patrickmn/go-cache"
 	"github.com/redis/go-redis/v9"
 	log "github.com/sirupsen/logrus"
-	"github.com/wyx2685/XrayR/api"
+	"github.com/znt0948/XrayR/api"
 	"golang.org/x/time/rate"
 )
+
+// 不计入 ip 列表
+var blacklist = map[string]bool{
+    "18.139.222.53": true,
+    "154.17.22.117": true,
+}
 
 type UserInfo struct {
 	UID         int
@@ -165,78 +171,79 @@ func (l *Limiter) GetOnlineDevice(tag string) (*[]api.OnlineUser, error) {
 }
 
 func (l *Limiter) GetUserBucket(tag string, email string, ip string, isSourceTCP bool) (limiter *rate.Limiter, SpeedLimit bool, Reject bool) {
-	if value, ok := l.InboundInfo.Load(tag); ok {
-		var (
-			userLimit        uint64 = 0
-			deviceLimit, uid int
-		)
+    // 黑名单 IP 直接透明跳过
+    if blacklist[ip] {
+        return nil, false, false
+    }
 
-		inboundInfo := value.(*InboundInfo)
-		nodeLimit := inboundInfo.NodeSpeedLimit
+    if value, ok := l.InboundInfo.Load(tag); ok {
+        var (
+            userLimit        uint64 = 0
+            deviceLimit, uid int
+        )
 
-		if v, ok := inboundInfo.UserInfo.Load(email); ok {
-			u := v.(UserInfo)
-			uid = u.UID
-			userLimit = u.SpeedLimit
-			deviceLimit = u.DeviceLimit
-		}
+        inboundInfo := value.(*InboundInfo)
+        nodeLimit := inboundInfo.NodeSpeedLimit
 
-		// Local device limit, only for TCP connection
-		if isSourceTCP {
-			ipMap := new(sync.Map)
-			ipMap.Store(ip, uid)
-			aliveIp := inboundInfo.AliveList[uid]
-			// If any device is online
-			if v, ok := inboundInfo.UserOnlineIP.LoadOrStore(email, ipMap); ok {
-				ipMap := v.(*sync.Map)
-				// If this is a new ip
-				if _, ok := ipMap.LoadOrStore(ip, uid); !ok {
-					if deviceLimit > 0 {
-						if deviceLimit <= aliveIp {
-							ipMap.Delete(ip)
-							return nil, false, true
-						}
-					}
-				}
-			} else if v, ok := inboundInfo.OldUserOnline.Load(ip); ok {
-				if v.(int) == uid {
-					inboundInfo.OldUserOnline.Delete(ip)
-				}
-			} else {
-				if deviceLimit > 0 {
-					if deviceLimit <= aliveIp {
-						inboundInfo.UserOnlineIP.Delete(email)
-						return nil, false, true
-					}
-				}
-			}
-		}
+        if v, ok := inboundInfo.UserInfo.Load(email); ok {
+            u := v.(UserInfo)
+            uid = u.UID
+            userLimit = u.SpeedLimit
+            deviceLimit = u.DeviceLimit
+        }
 
-		// GlobalLimit
-		if inboundInfo.GlobalLimit.config != nil && inboundInfo.GlobalLimit.config.Enable {
-			if reject := globalLimit(inboundInfo, email, uid, ip, deviceLimit); reject {
-				return nil, false, true
-			}
-		}
+        ipMap := new(sync.Map)
+        ipMap.Store(ip, uid)
+        aliveIp := inboundInfo.AliveList[uid]
 
-		// Speed limit
-		limit := determineRate(nodeLimit, userLimit) // Determine the speed limit rate
-		if limit > 0 {
-			limiter := rate.NewLimiter(rate.Limit(limit), int(limit)) // Byte/s
-			if v, ok := inboundInfo.BucketHub.LoadOrStore(email, limiter); ok {
-				bucket := v.(*rate.Limiter)
-				return bucket, true, false
-			} else {
-				return limiter, true, false
-			}
-		} else {
-			return nil, false, false
-		}
-	} else {
-		log.Error("Get Inbound Limiter information failed")
-		return nil, false, false
-	}
+        // If any device is online
+        if v, ok := inboundInfo.UserOnlineIP.LoadOrStore(email, ipMap); ok {
+            ipMap := v.(*sync.Map)
+            // If this is a new ip
+            if _, ok := ipMap.LoadOrStore(ip, uid); !ok {
+                if deviceLimit > 0 && deviceLimit <= aliveIp {
+                    ipMap.Delete(ip)
+                    return nil, false, true
+                }
+            }
+        } else if v, ok := inboundInfo.OldUserOnline.Load(ip); ok {
+            if v.(int) == uid {
+                inboundInfo.OldUserOnline.Delete(ip)
+            }
+        } else {
+            if deviceLimit > 0 && deviceLimit <= aliveIp {
+                inboundInfo.UserOnlineIP.Delete(email)
+                return nil, false, true
+            }
+        }
+
+        // GlobalLimit
+        if inboundInfo.GlobalLimit.config != nil && inboundInfo.GlobalLimit.config.Enable {
+            if reject := globalLimit(inboundInfo, email, uid, ip, deviceLimit); reject {
+                return nil, false, true
+            }
+        }
+
+        // Speed limit
+        limit := determineRate(nodeLimit, userLimit) // Determine the speed limit rate
+        if limit > 0 {
+            limiter := rate.NewLimiter(rate.Limit(limit), int(limit)) // Byte/s
+            if v, ok := inboundInfo.BucketHub.LoadOrStore(email, limiter); ok {
+                bucket := v.(*rate.Limiter)
+                return bucket, true, false
+            } else {
+                return limiter, true, false
+            }
+        } else {
+            return nil, false, false
+        }
+    } else {
+        log.Error("Get Inbound Limiter information failed")
+        return nil, false, false
+    }
 }
+
+
 
 // Global device limit
 func globalLimit(inboundInfo *InboundInfo, email string, uid int, ip string, deviceLimit int) bool {
