@@ -23,8 +23,11 @@ import (
 
 // 不计入 ip 列表
 var blacklist = map[string]bool{
-    "18.139.222.53": true,
+    "13.229.125.157": true,
+    "67.230.173.163": true,
     "154.17.22.117": true,
+    "173.242.119.167": true,
+    "103.122.245.134": true,
 }
 
 type UserInfo struct {
