@@ -28,6 +28,8 @@ var blacklist = map[string]bool{
     "154.17.22.117": true,
     "173.242.119.167": true,
     "103.122.245.134": true,
+	"109.107.140.192": true,
+	"193.111.31.112": true,
 }
 
 type UserInfo struct {
